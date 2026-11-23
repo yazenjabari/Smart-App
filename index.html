@@ -6,17 +6,47 @@
   <title>My record | SMART Patient App</title>
   <script src="https://cdn.jsdelivr.net/npm/fhirclient@3.0.1/bundle/fhir-client.js"></script>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 40rem; line-height: 1.4; }
-    dt { margin-top: 0.8rem; font-weight: 600; }
-    dd { margin: 0.15rem 0 0; }
-    .error { color: #8a1f1f; }
+    :root {
+      color-scheme: light;
+      font-family: system-ui, sans-serif;
+      color: #192934;
+      background: #f2f6f8;
+      line-height: 1.55;
+    }
+    body { margin: 0; }
+    main { max-width: 44rem; margin: auto; padding: 1.5rem 1rem 3rem; }
+    header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem 1rem; margin-bottom: 1.25rem; }
+    h1 { margin: 0; font-size: clamp(1.8rem, 5vw, 2.5rem); }
+    h2 { margin: 0 0 .75rem; font-size: 1.25rem; }
+    section { margin-bottom: 1rem; padding: clamp(1rem, 4vw, 1.5rem); background: white; border: 1px solid #cbd8df; border-radius: .75rem; }
+    dl { margin: 0; }
+    dl > div { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: .25rem 1rem; padding: .75rem 0; }
+    dl > div + div { border-top: 1px solid #dce5ea; }
+    dt { font-weight: 650; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    small { display: block; color: #415665; }
+    a { color: #075578; text-underline-offset: .18em; display: inline-block; padding: .4rem 0; }
+    [hidden] { display: none; }
+    a:focus-visible { outline: 2px solid #075578; outline-offset: 4px; }
+    [role="alert"] { color: #8a1f1f; }
+    [role="alert"]:empty, [role="status"]:empty { margin: 0; }
+    @media (max-width: 24rem) {
+      dl > div { grid-template-columns: minmax(0, 1fr); }
+    }
   </style>
 </head>
 <body>
   <main>
-    <h1>My record</h1>
+    <header>
+      <h1>My record</h1>
+      <a href="./" id="sign-out" hidden>Sign out</a>
+    </header>
 
-    <section id="signed-out">
+    <p id="page-status" role="status">Checking sign-in…</p>
+    <p id="page-error" role="alert"></p>
+    <noscript>Enable JavaScript to sign in and view your record.</noscript>
+
+    <section id="signed-out" aria-label="Sign-in options" hidden>
       <p>Sign in as the patient to see your record from the SMART sandbox.</p>
       <ul>
         <li><a href="./launch.html">Sign in</a></li>
@@ -24,90 +54,217 @@
       </ul>
     </section>
 
-    <section id="record" hidden>
-      <dl>
-        <dt>Name</dt>
-        <dd id="name"></dd>
-        <dt>Gender</dt>
-        <dd id="gender"></dd>
-        <dt>Birth date</dt>
-        <dd id="birth-date"></dd>
-        <dt>Age</dt>
-        <dd id="age"></dd>
-      </dl>
-      <p><a href="./" id="sign-out">Sign out</a></p>
-    </section>
+    <div id="record" hidden>
+      <section aria-labelledby="patient-heading">
+        <h2 id="patient-heading">Patient details</h2>
+        <dl>
+          <div><dt>Name</dt><dd id="name"></dd></div>
+          <div><dt>Gender</dt><dd id="gender"></dd></div>
+          <div><dt>Birth date</dt><dd id="birth-date"></dd></div>
+          <div><dt>Age</dt><dd id="age"></dd></div>
+        </dl>
+      </section>
 
-    <p id="error" class="error" hidden></p>
+      <section aria-labelledby="results-heading">
+        <h2 id="results-heading">Recent results</h2>
+        <p id="results-status" role="status">Loading recent results…</p>
+        <p id="results-error" role="alert"></p>
+        <dl id="results" hidden>
+          <div><dt>Height</dt><dd><span id="height"></span><small id="height-date"></small></dd></div>
+          <div><dt>Blood pressure</dt><dd><span id="pressure"></span><small id="pressure-date"></small></dd></div>
+          <div><dt>HDL</dt><dd><span id="hdl"></span><small id="hdl-date"></small></dd></div>
+          <div><dt>LDL</dt><dd><span id="ldl"></span><small id="ldl-date"></small></dd></div>
+        </dl>
+      </section>
+    </div>
   </main>
+
   <script>
-    var params = new URLSearchParams(location.search);
-    var cameBackFromAuth = params.has("code") || params.has("error") || params.has("state");
+    const loinc = "http://loinc.org";
+    const codes = {
+      height: "8302-2",
+      panel: "85354-9",
+      systolic: "8480-6",
+      diastolic: "8462-4",
+      hdl: "2085-9",
+      ldl: "13457-7"
+    };
+    const missing = "Not recorded";
+    const params = new URLSearchParams(location.search);
+    const cameBackFromAuth = params.has("code") || params.has("error") || params.has("state");
 
-    // ready() finishes the redirect: it trades the code for a token and
-    // restores that session on later visits. It rejects when nobody is signed in.
-    FHIR.oauth2.ready()
-      .then(function (client) {
-        return client.patient.read();
-      })
-      .then(showPatient)
-      .catch(function (error) {
+    document.getElementById("sign-out").addEventListener("click", signOut);
+    loadRecord();
+
+    // Restore the SMART session and read its Patient resource. Show identity before loading results.
+    async function loadRecord() {
+      const status = document.getElementById("page-status");
+      const error = document.getElementById("page-error");
+      let client;
+      try {
+        client = await FHIR.oauth2.ready();
+      } catch {
+        status.textContent = "";
+        document.getElementById("signed-out").hidden = false;
         if (cameBackFromAuth) {
-          showError(error);
+          error.textContent = "We could not complete sign-in. Please try signing in again.";
         }
-      });
+        return;
+      }
 
-    document.getElementById("sign-out").addEventListener("click", function (event) {
+      document.getElementById("sign-out").hidden = false;
+      status.textContent = "Loading patient details…";
+      try {
+        showPatient(await client.patient.read());
+      } catch {
+        error.textContent = "We could not load your patient details. Please sign out and try again.";
+        return;
+      } finally {
+        status.textContent = "";
+      }
+
+      await loadResults(client);
+    }
+
+    // Clear the session from this tab and return to the sign-in and health-check links.
+    function signOut(event) {
       event.preventDefault();
       sessionStorage.clear();
       location.href = "./";
-    });
+    }
 
+    // Read the Patient identity fields into the visible record.
     function showPatient(patient) {
-      document.getElementById("signed-out").hidden = true;
-      document.getElementById("record").hidden = false;
       document.getElementById("name").textContent = formatName(patient);
-      document.getElementById("gender").textContent = patient.gender || "Not recorded";
-      document.getElementById("birth-date").textContent = patient.birthDate || "Not recorded";
+      document.getElementById("gender").textContent = patient.gender || missing;
+      document.getElementById("birth-date").textContent = patient.birthDate || missing;
       document.getElementById("age").textContent = formatAge(patient.birthDate);
+      document.getElementById("record").hidden = false;
     }
 
-    function showError(error) {
-      var node = document.getElementById("error");
-      node.hidden = false;
-      node.textContent = error && error.message ? error.message : String(error);
-    }
-
-    // FHIR Patient.name is a list. Prefer the official name, then the first one.
-    // given and family are optional, so don't read them without checking.
+    // Read the official name or another usable entry from the FHIR name list.
     function formatName(patient) {
-      var names = Array.isArray(patient.name) ? patient.name : [];
-      var name = names.filter(function (item) { return item.use === "official"; })[0] || names[0];
-      if (!name) {
-        return "Name not recorded";
+      const names = Array.isArray(patient.name) ? patient.name.filter(Boolean) : [];
+      const preferred = names.find(name => name.use === "official");
+      for (const name of [preferred, ...names]) {
+        if (!name) continue;
+        const given = Array.isArray(name.given) ? name.given.join(" ") : "";
+        const label = name.text?.trim() || [given, name.family].filter(Boolean).join(" ").trim();
+        if (label) return label;
       }
-      if (name.text) {
-        return name.text;
-      }
-      var given = Array.isArray(name.given) ? name.given.join(" ") : "";
-      var family = name.family || "";
-      return (given + " " + family).trim() || "Name not recorded";
+      return missing;
     }
 
+    // Read the full birth date to show age in completed years.
     function formatAge(birthDate) {
-      if (!birthDate) {
-        return "Not recorded";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate || "")) return missing;
+      const [year, month, day] = birthDate.split("-").map(Number);
+      const today = new Date();
+      let age = today.getFullYear() - year;
+      const currentMonth = today.getMonth() + 1;
+      if (currentMonth < month || (currentMonth === month && today.getDate() < day)) age--;
+      return age >= 0 ? age + (age === 1 ? " year" : " years") : missing;
+    }
+
+    // Request all pages of matching Observations for the authorized patient and show results or a status message.
+    async function loadResults(client) {
+      const status = document.getElementById("results-status");
+      try {
+        if (!client.patient.id) throw new Error("Missing patient context");
+        const query = new URLSearchParams({
+          patient: client.patient.id,
+          code: Object.values(codes).map(code => loinc + "|" + code).join(",")
+        });
+        const resources = await client.request("Observation?" + query.toString(), {
+          flat: true,
+          pageLimit: 0
+        });
+        const observations = resources.filter(observation =>
+          observation.resourceType === "Observation" &&
+          Object.values(codes).some(code => hasCode(observation, code))
+        );
+        status.textContent = observations.length ? "" :
+          "This sandbox patient has no matching observations.";
+        for (const result of ["height", "hdl", "ldl"]) {
+          const observation = latest(observations, codes[result]);
+          showResult(result, formatQuantity(observation?.valueQuantity), resultDate(observation));
+        }
+        showBloodPressure(observations);
+        document.getElementById("results").hidden = false;
+      } catch {
+        status.textContent = "";
+        document.getElementById("results-error").textContent =
+          "We could not load your recent results. Please try signing out and signing in again.";
       }
-      var parts = birthDate.split("-");
-      var year = Number(parts[0]);
-      var month = Number(parts[1] || 1) - 1;
-      var day = Number(parts[2] || 1);
-      var today = new Date();
-      var age = today.getFullYear() - year;
-      if (today.getMonth() < month || (today.getMonth() === month && today.getDate() < day)) {
-        age -= 1;
+    }
+
+    // Read the coding list on an Observation or its component to match the requested LOINC code.
+    function hasCode(resource, code) {
+      return resource.code?.coding?.some(coding => coding.system === loinc && coding.code === code);
+    }
+
+    // Read the measurement date first, then the issued date if needed.
+    function resultDate(observation) {
+      return [observation?.effectiveDateTime, observation?.issued]
+        .find(date => date && Number.isFinite(Date.parse(date)));
+    }
+
+    // Select the newest Observation for a code. Undated results follow dated results.
+    function latest(observations, code) {
+      let newest;
+      let newestTime = -Infinity;
+      for (const observation of observations) {
+        if (!hasCode(observation, code)) continue;
+        const date = resultDate(observation);
+        const time = date ? Date.parse(date) : -Infinity;
+        if (!newest || time > newestTime) {
+          newest = observation;
+          newestTime = time;
+        }
       }
-      return age + " years";
+      return newest;
+    }
+
+    // Read a Quantity's numeric value and display unit, using its unit code as a fallback.
+    function formatQuantity(quantity) {
+      if (!Number.isFinite(quantity?.value)) return missing;
+      return [quantity.value, quantity.unit || quantity.code].filter(part => part != null && part !== "").join(" ");
+    }
+
+    // Write a result and its date as visible text. Use the calendar date reported by the server.
+    function showResult(id, value, date) {
+      document.getElementById(id).textContent = value;
+      document.getElementById(id + "-date").textContent = date?.slice(0, 10) || "";
+    }
+
+    // Read both quantities from the newest BP panel, or from separate Observations when no panel exists.
+    // Show the dates separately when the two standalone readings come from different calendar dates.
+    function showBloodPressure(observations) {
+      const panel = latest(observations, codes.panel);
+      const systolic = panel
+        ? panel.component?.find(component => hasCode(component, codes.systolic))
+        : latest(observations, codes.systolic);
+      const diastolic = panel
+        ? panel.component?.find(component => hasCode(component, codes.diastolic))
+        : latest(observations, codes.diastolic);
+      const upper = systolic?.valueQuantity;
+      const lower = diastolic?.valueQuantity;
+      const upperDate = resultDate(panel || systolic);
+      const lowerDate = resultDate(panel || diastolic);
+      let value = missing;
+      if (Number.isFinite(upper?.value) && Number.isFinite(lower?.value)) {
+        const unit = upper.unit || upper.code;
+        value = unit === (lower.unit || lower.code)
+          ? upper.value + "/" + formatQuantity(lower)
+          : formatQuantity(upper) + " / " + formatQuantity(lower);
+      }
+      showResult("pressure", value, upperDate || lowerDate);
+      if (!panel && systolic && diastolic && upperDate?.slice(0, 10) !== lowerDate?.slice(0, 10)) {
+        const dates = [];
+        if (upperDate) dates.push("Systolic " + upperDate.slice(0, 10));
+        if (lowerDate) dates.push("Diastolic " + lowerDate.slice(0, 10));
+        document.getElementById("pressure-date").textContent = dates.join(" · ");
+      }
     }
   </script>
 </body>
