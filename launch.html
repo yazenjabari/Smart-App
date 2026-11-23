@@ -35,7 +35,7 @@
       // Public client. The sandbox does not require a registered secret.
       clientId: "my_web_app",
       // launch/patient asks the sandbox to pick the patient during sign-in.
-      scope: "launch/patient openid fhirUser patient/Patient.read",
+      scope: "launch/patient openid fhirUser patient/Patient.read patient/Observation.read",
       // Must be this app's index.html. fhir-client turns the relative URL
       // into the full GitHub Pages URL before sending it.
       redirectUri: "index.html",
